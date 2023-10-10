@@ -1,0 +1,332 @@
+---
+title: "Differential expression analysis of OSCC Tumour and Non-tumour samples of
+  3 patients"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+```{r, results='hide', warning=FALSE, message=FALSE}
+# Import packages and databases here 
+
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+BiocManager::install("org.Hs.eg.db")
+#Genome wide annotation for Human, primarily based on mapping using Entrez Gene identifiers.
+
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+BiocManager::install(version = "3.15")
+
+
+if (!require("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+BiocManager::install("edgeR")
+
+
+if (!require("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+BiocManager::install("GO.db")
+
+
+library(edgeR)
+#Genome wide annotation for Human
+library(org.Hs.eg.db)
+```
+
+### Import the raw counts table
+
+Three patients: 8, 33, 51
+
+Normal / tissue sample for each patient and associated read counts
+
+```{r}
+# load the raw-count data
+rawdata <- read.delim("TableS1.txt", check.names=FALSE, stringsAsFactors=FALSE)
+rawdata
+
+```
+
+### Create Differential Gene Expression List object
+
+A function provided by EdgeR package to generate an object with specific containers:
+
+-   Counts: numeric matrix containing the read counts
+
+-   genes: Dataframe containing annotation information for the genes
+
+```{r}
+ # make a new DGElist object re-naming cols 4-9 (8N-51T) as counts and cols 1-3 as genes , normalisation factors defaulted to 1 
+y <- DGEList(counts=rawdata[,4:9], genes=rawdata[,1:3])
+
+y
+```
+
+### Add IDs and information to dataframes
+
+```{r}
+# find the RefSeqID in org.Hs.eg.db annotation database
+idfound <- y$genes$RefSeqID %in% mappedRkeys(org.Hs.egREFSEQ)
+```
+
+```{r}
+# select only the rows where ID found within egREFSEQ database
+y <- y[idfound,]  
+dim(y)
+```
+
+org.Hs.egREFSEQ is an R object that provides mappings between entrez gene identifiers and RefSeq identifiers.
+
+```{r}
+#org.Hs.egREFSEQ is an R object that provides mappings between entrez gene identifiers and RefSeq identifiers.
+
+egREFSEQ <- toTable(org.Hs.egREFSEQ)  
+head(egREFSEQ)
+
+```
+
+```{r}
+#find the index positions where RefSeqID matches the accession number in egREFSEQ
+m <- match(y$genes$RefSeqID, egREFSEQ$accession)
+
+# add REFSEQ - Gene from egREFSEQ to col EntrezGene to gene DF
+y$genes$EntrezGene <- egREFSEQ$gene_id[m]
+
+y$genes
+```
+
+org.Hs.egSYMBOL is an R object that provides mappings between entrez gene identifiers and gene abbreviations.
+
+```{r}
+# make table of egSYMBOL object containing gene ID and symbol code
+egSYMBOL <- toTable(org.Hs.egSYMBOL)
+head(egSYMBOL)
+```
+
+```{r}
+# vector of matched items between entrezGene IDs and the previous egSYMBOL geneIDs 
+m <- match(y$genes$EntrezGene, egSYMBOL$gene_id)
+
+# add gene IDs to symbols col based on entrez ID match - to update them
+y$genes$Symbol <- egSYMBOL$symbol[m]
+head(y$genes)
+```
+
+```{r}
+# sum each row in the counts dataframe , order by index 
+o <- order(rowSums(y$counts), decreasing=TRUE)
+
+y
+```
+
+```{r}
+# apply order index to DGE list object counts , to order highest read-count RefSeq IDs are at the top
+y <- y[o,]
+
+y
+```
+
+```{r}
+# find duplicated genes based on Symbol , and filter them out
+d <- duplicated(y$genes$Symbol)
+y <- y[!d,]
+nrow(y)
+# (15532 - 10510) duplicated genes were removed 
+```
+
+```{r}
+# re-count the sums of gene counts and apply to lib.size
+y$samples$lib.size <- colSums(y$counts)
+
+# apply Entrez gene IDs as rownames
+rownames(y$counts) <- rownames(y$genes) <- y$genes$EntrezGene
+y$genes$EntrezGene <- NULL
+
+#Calculate normalization factors to scale the raw library sizes (so can compare)
+y <- calcNormFactors(y)
+
+#y$samples
+#y$counts
+#y$genes
+
+
+```
+
+### MDS: Multidimensional scaling plot of distances between gene expression profiles
+
+Plot samples on a two-dimensional scatterplot so that distances on the plot approximate the typical log2 fold changes between the samples.
+
+```{r}
+plotMDS(y)
+```
+
+```{r}
+Patient <- factor(c(8,8,33,33,51,51))
+Tissue <- factor(c("N","T","N","T","N","T"))
+data.frame(Sample=colnames(y),Patient,Tissue)
+```
+
+```{r}
+design <- model.matrix(~Patient+Tissue)
+rownames(design) <- colnames(y)
+
+#desingmnatrix  -used for the linear model
+```
+
+```{r}
+
+y <- estimateDisp(y, design, robust=TRUE)
+y$common.dispersion
+```
+
+```{r}
+# take the square root of this to find the dispersion estimation 
+  #which tells you the variation 
+  # shown in the BCV plot below
+variation = sqrt(y$common.dispersion)
+variation
+```
+
+**Plot Biological Coefficient of Variation**
+
+Plot the genewise biological coefficient of variation (BCV) against gene abundance (in log2 counts per million).
+
+```{r}
+plotBCV(y)
+
+# the values are collected together so there is no variation = good quality data 
+```
+
+### Finding Deferentially Expressed genes
+
+```{r}
+# FIND DIFFERENTIALLY EXPRESSED GENES 
+
+#fit general linear model to Y read counts for each gene.
+fit <- glmFit(y, design)
+
+# pairwise comparisons
+# Use likelihood ratio test to obtain p-value.
+lrt <- glmLRT(fit)
+
+#Extract top 10 DE tags, ranked by P-value
+topTags(lrt)
+
+
+# LOG FC = 5 means the gene was down-expressed 5x less compared to other examples 
+
+```
+
+```{r}
+colnames(design)
+```
+
+Show counts per million result for the top 10 genes with smallest (most significant Pvalues=)
+
+```{r}
+#show counts per million result for the top 10 genes with smallest (most significant Pvalues)
+o <- order(lrt$table$PValue)
+cpm(y)[o[1:10],]
+
+```
+
+Identify which genes are significantly differentially expressed for each contrast from a fit object containing p-values and test statistics
+
+```{r}
+summary(decideTests(lrt))
+```
+
+Plot Mean Difference
+
+```{r}
+# mean-difference plot (aka MA plot) with color coding for highlighted points.
+#n XY scatter plot that compares the disagreement, or differences, between two quantitative measurements.
+plotMD(lrt, main = "Tumour tissue sample Mean-Difference")
+abline(h=c(-1, 1), col="blue")
+
+```
+
+### Gene Ontology
+
+Test for over-representation of gene ontology (GO) terms or KEGG pathways in the up and down differentially expressed genes from a linear model fit. Extract top GO terms from goana output or top KEGG pathways from kegga output.
+
+```{r}
+#gene ontology
+
+# Find over-representation of gene ontology in MultiArrayLinear Model fit 
+go <- goana(lrt)
+```
+
+Biological Process (BP) Ontology - UP-regulated most significant
+
+Output table values: Term: GO term.
+
+Ont: ontology that the GO term belongs to. Possible values are "BP", "CC" and "MF".
+
+N: number of genes in the GO term.
+
+Up:number of up-regulated differentially expressed genes.
+
+Down: number of down-regulated differentially expressed genes.
+
+```{r}
+# Get top 30 Gene Ontology terms from GO output 
+# sorted by UP-regulated most significant p-value 
+# Biological Process (BP) Ontology 
+topGO(go, ont="BP", sort="Up", n=30,truncate = NULL)
+topGO_BP_UP = topGO(go, ont="BP", sort="Up", n=30, truncate = NULL)
+
+write.csv(topGO_BP_UP,"C:\\Users\\oscar\\OneDrive\\Desktop\\topGO_BP_UP.csv", row.names = FALSE)
+```
+
+Biological Process (BP) Ontology - DOWN-regulated most significant
+
+```{r}
+topGO(go, ont="BP", sort="Down", n=30, truncate.term = NULL)
+topGO_BP_DOWN = topGO(go, ont="BP", sort="Down", n=30, truncate.term = NULL)
+
+write.csv(topGO_BP_DOWN,"C:\\Users\\oscar\\OneDrive\\Desktop\\topGO_BP_DOWN.csv", row.names = FALSE)
+```
+
+Cellular Component (CC) ontology - UP-regulated most significant
+
+```{r}
+# Cellular Component (CC) ontology - up-regulated most significant 
+topGO(go, ont="CC", sort="Up", n=30, truncate.term = NULL)
+
+topGO_CC_UP= topGO(go, ont="CC", sort="Up", n=30, truncate=30)
+
+write.csv(topGO_CC_UP,"C:\\Users\\oscar\\OneDrive\\Desktop\\topGO_CC_UP.csv", row.names = FALSE)
+```
+
+Cellular Component (CC) ontology - DOWN-regulated most significant
+
+```{r}
+topGO(go, ont="CC", sort="Down", n=30, truncate = NULL)
+
+topGO_CC_DOWN= topGO(go, ont="CC", sort="Down", n=30, truncate = NULL)
+
+write.csv(topGO_CC_DOWN,"C:\\Users\\oscar\\OneDrive\\Desktop\\topGO_CC_DOWN.csv", row.names = FALSE)
+```
+
+Molecular Function (MF) ontology - UP-regulated most significant
+
+```{r}
+# Molecular Function (MF) ontology - up-regulated most significant 
+topGO(go, ont="MF", sort="Up", n=30, truncate.term = NULL)
+
+topGO_MF_UP = topGO(go, ont="MF", sort="Up", n=30, truncate.term = NULL)
+
+write.csv(topGO_MF_UP ,"C:\\Users\\oscar\\OneDrive\\Desktop\\topGO_MF_UP .csv", row.names = FALSE)
+```
+
+Molecular Function (MF) ontology - DOWN-regulated most significant
+
+```{r}
+topGO(go, ont="MF", sort="Down", n=30, truncate = NULL)
+
+topGO_MF_DOWN = topGO(go, ont="MF", sort="Down", n=30, truncate = NULL)
+
+write.csv(topGO_MF_DOWN,"C:\\Users\\oscar\\OneDrive\\Desktop\\topGO_MF_DOWN.csv", row.names = FALSE)
+```
